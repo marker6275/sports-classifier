@@ -62,6 +62,6 @@ class ScreenViewer:
 if __name__ == "__main__":
     root = tk.Tk()
 
-    app = ScreenViewer(root, update_interval=100, capture_interval=25, save_folder="screenshots") # Captures every 2.5 seconds/every 25 frames
+    ScreenViewer(root, update_interval=100, capture_interval=25, save_folder="screenshots") # Captures every 2.5 seconds/every 25 frames
 
     root.mainloop()

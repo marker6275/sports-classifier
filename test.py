@@ -26,7 +26,6 @@ def load_model():
 
     model = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
     model.fc = nn.Linear(model.fc.in_features, len(classes))
-    in_features = model.fc.in_features
     
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
