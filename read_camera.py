@@ -10,6 +10,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from predict_utils import load_model, predict_image_all
+from websocket import WebSocketServer
 
 IMAGE_SIZE = 224
 INTERVAL_SECONDS = 1.0
@@ -303,6 +304,15 @@ def main():
         "football": 3
     }
     DEFAULT_MIN_CONSECUTIVE_FRAMES = 4
+
+    WEBSOCKET_ENABLED = True
+    WEBSOCKET_HOST = 'localhost'
+    WEBSOCKET_PORT = 8765
+
+    ws_server = None
+    if WEBSOCKET_ENABLED:
+        ws_server = WebSocketServer(host=WEBSOCKET_HOST, port=WEBSOCKET_PORT)
+        ws_server.start()
 
     cameras = list_cameras()
 
@@ -623,10 +633,29 @@ def main():
                         consecutive_high_confidence[best_tracked_class] >= required_frames):
                         if current_tracked_label is not None and current_tracked_label != best_tracked_class:
                             print(f"⚠️  Label changed: {current_tracked_label} → {best_tracked_class}")
+                            if ws_server:
+                                ws_server.send_update({
+                                    'type': 'label_changed',
+                                    'previous_label': current_tracked_label,
+                                    'new_label': best_tracked_class,
+                                    'confidence': best_tracked_conf,
+                                    'timestamp': time.time()
+                                })
                         current_tracked_label = best_tracked_class
                     elif current_tracked_label is None:
-
                         current_tracked_label = best_tracked_class
+                        
+                    if ws_server:
+                        is_sport = current_tracked_label in ['basketball', 'football']
+                        ws_server.send_update({
+                            'type': 'status_update',
+                            'label': current_tracked_label,
+                            'is_sport': is_sport,
+                            'is_commercial': current_tracked_label == 'commercial',
+                            'confidence': class_confidence_tracker.get(current_tracked_label, 0),
+                            'all_confidences': {k: float(v) for k, v in class_confidence_tracker.items()},
+                            'timestamp': time.time()
+                        })
 
                     print(f"Instant Prediction: {label}, Confidence: {confidence:.2f}")
                     print(f"Tracked Label: {current_tracked_label} (avg: {class_confidence_tracker.get(current_tracked_label, 0):.2f})")
@@ -654,6 +683,8 @@ def main():
         print("\nInterrupted by user.")
 
     finally:
+        if ws_server:
+            ws_server.stop()
         cap.release()
         cv2.destroyAllWindows()
         print("Camera released and windows closed.")

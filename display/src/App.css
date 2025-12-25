@@ -1,0 +1,20 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.app {
+  width: 100vw;
+  height: 100vh;
+  background: transparent;
+  border: 8px solid #666;
+  pointer-events: none;
+  transition: border-color 0.3s ease;
+}
+
