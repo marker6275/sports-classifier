@@ -49,8 +49,8 @@ def refine_box_to_aspect_ratio(x1, y1, x2, y2, target_aspect_ratio, frame_width,
 
     return new_x1, new_y1, new_x2, new_y2
 
-def refine_yolo_detection_with_brightness(frame, yolo_box, target_aspect_ratio,
-                                         brightness_threshold_percentile=50, step_size=30, expand_ratio=0.2):
+def refine_yolo_detection_with_edges(frame, yolo_box, target_aspect_ratio,
+                                     expand_ratio=0.15, canny_low=50, canny_high=150):
 
     if yolo_box is None:
         return None
@@ -77,71 +77,80 @@ def refine_yolo_detection_with_brightness(frame, yolo_box, target_aspect_ratio,
     except:
         gray = search_region if len(search_region.shape) == 2 else cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
 
-    brightness_threshold = np.percentile(gray, brightness_threshold_percentile)
-
+    edges = cv2.Canny(gray, canny_low, canny_high)
+    
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     search_h, search_w = gray.shape[:2]
-    search_area = search_h * search_w
-
-    min_width = max(10, int(box_width * 0.5))
-    max_width = min(search_w, int(search_h * target_aspect_ratio))
-
-    if max_width < min_width:
-        return None
-
     best_box = None
     best_score = 0
-
-    sizes_to_try = []
-    current_width = max_width
-    iterations = 0
-    max_iterations = 6
-    while current_width >= min_width and iterations < max_iterations:
-        width = int(current_width)
-        height = int(width / target_aspect_ratio)
-        if height <= search_h and width <= search_w and height > 0 and width > 0:
-            sizes_to_try.append((width, height))
-        current_width *= 0.85
-        iterations += 1
-
-    sizes_to_try.sort(key=lambda s: s[0] * s[1], reverse=True)
-
-    for width, height in sizes_to_try[:3]:
-        max_y = max(1, search_h - height + 1)
-        max_x = max(1, search_w - width + 1)
-
-        for y in range(0, max_y, step_size):
-            for x in range(0, max_x, step_size):
-                try:
-                    region = gray[y:y+height, x:x+width]
-                    if region.size == 0:
-                        continue
-                except:
-                    continue
-
-                mean_brightness = np.mean(region)
-                bright_pixel_ratio = np.sum(region > brightness_threshold) / region.size
-
-                area = width * height
-                area_normalized = min(area / search_area, 1.0)
-                size_weight = area_normalized ** 2
-                brightness_score = (mean_brightness / 255.0) * (1 + bright_pixel_ratio)
-                score = brightness_score * (0.3 + 0.7 * size_weight) * area
-
-                if score > best_score:
-                    best_score = score
-
-                    frame_x1 = search_x1 + x
-                    frame_y1 = search_y1 + y
-                    frame_x2 = search_x1 + x + width
-                    frame_y2 = search_y1 + y + height
-
-                    combined_conf = (yconf * 0.6 + brightness_score * 0.4)
-                    best_box = (frame_x1, frame_y1, frame_x2, frame_y2, combined_conf)
-
+    
+    aspect_tolerance = 0.15
+    
+    for contour in contours:
+        if len(contour) < 4:
+            continue
+        
+        x, y, cw, ch = cv2.boundingRect(contour)
+        if cw < 10 or ch < 10:
+            continue
+        
+        contour_aspect = cw / ch if ch > 0 else 0
+        aspect_diff = abs(contour_aspect - target_aspect_ratio) / target_aspect_ratio
+        
+        if aspect_diff > aspect_tolerance:
+            continue
+        
+        area = cw * ch
+        contour_area = cv2.contourArea(contour)
+        extent = contour_area / area if area > 0 else 0
+        
+        rect = cv2.minAreaRect(contour)
+        box_points = cv2.boxPoints(rect)
+        box_area = cv2.contourArea(box_points)
+        box_extent = contour_area / box_area if box_area > 0 else 0
+        
+        edge_density = np.sum(edges[y:y+ch, x:x+cw] > 0) / area if area > 0 else 0
+        
+        score = (extent * 0.4 + box_extent * 0.3 + edge_density * 0.3) * area * (1 - aspect_diff)
+        
+        if score > best_score:
+            best_score = score
+            
+            frame_x1 = search_x1 + x
+            frame_y1 = search_y1 + y
+            frame_x2 = search_x1 + x + cw
+            frame_y2 = search_y1 + y + ch
+            
+            refined_width = cw
+            refined_height = int(refined_width / target_aspect_ratio)
+            
+            if refined_height <= ch:
+                center_y = y + ch // 2
+                frame_y1 = search_y1 + center_y - refined_height // 2
+                frame_y2 = search_y1 + center_y + refined_height // 2
+            else:
+                refined_height = ch
+                refined_width = int(refined_height * target_aspect_ratio)
+                center_x = x + cw // 2
+                frame_x1 = search_x1 + center_x - refined_width // 2
+                frame_x2 = search_x1 + center_x + refined_width // 2
+            
+            frame_x1 = max(search_x1, min(frame_x1, search_x2))
+            frame_y1 = max(search_y1, min(frame_y1, search_y2))
+            frame_x2 = max(search_x1, min(frame_x2, search_x2))
+            frame_y2 = max(search_y1, min(frame_y2, search_y2))
+            
+            combined_conf = min(yconf * 0.9 + (best_score / (search_w * search_h)) * 0.1, 1.0)
+            best_box = (frame_x1, frame_y1, frame_x2, frame_y2, combined_conf)
+    
+    if best_box is None:
+        return yolo_box
+    
     return best_box
 
-def find_brightest_16_9_region(frame, target_aspect_ratio, min_size_ratio=0.1, max_size_ratio=0.85,
-                                brightness_threshold_percentile=50, step_size=20):
+def find_tv_with_edges(frame, target_aspect_ratio, min_size_ratio=0.1, max_size_ratio=0.85,
+                        canny_low=50, canny_high=150):
 
     if frame is None or frame.size == 0:
         return None
@@ -155,74 +164,79 @@ def find_brightest_16_9_region(frame, target_aspect_ratio, min_size_ratio=0.1, m
     try:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     except:
-
         gray = frame if len(frame.shape) == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    brightness_threshold = np.percentile(gray, brightness_threshold_percentile)
+    edges = cv2.Canny(gray, canny_low, canny_high)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     min_area = frame_area * min_size_ratio * min_size_ratio
     max_area = frame_area * max_size_ratio * max_size_ratio
 
     best_box = None
     best_score = 0
+    aspect_tolerance = 0.15
 
-    max_width = min(w, int(h * target_aspect_ratio))
+    for contour in contours:
+        if len(contour) < 4:
+            continue
 
-    min_width = max(10, int(np.sqrt(min_area * target_aspect_ratio)))
+        x, y, cw, ch = cv2.boundingRect(contour)
+        if cw < 10 or ch < 10:
+            continue
 
-    if max_width < min_width:
-
-        return None
-
-    sizes_to_try = []
-    current_width = max_width
-    iterations = 0
-    max_iterations = 12
-    while current_width >= min_width and iterations < max_iterations:
-        width = int(current_width)
-        height = int(width / target_aspect_ratio)
-        if height <= h and width <= w and height > 0 and width > 0:
-            sizes_to_try.append((width, height))
-        current_width *= 0.90
-        iterations += 1
-
-    sizes_to_try.sort(key=lambda s: s[0] * s[1], reverse=True)
-
-    if not sizes_to_try:
-        return None
-
-    for width, height in sizes_to_try:
-        area = width * height
+        area = cw * ch
         if area < min_area or area > max_area:
             continue
 
-        max_y = max(1, h - height + 1)
-        max_x = max(1, w - width + 1)
+        contour_aspect = cw / ch if ch > 0 else 0
+        aspect_diff = abs(contour_aspect - target_aspect_ratio) / target_aspect_ratio
 
-        for y in range(0, max_y, step_size):
-            for x in range(0, max_x, step_size):
+        if aspect_diff > aspect_tolerance:
+            continue
 
-                try:
-                    region = gray[y:y+height, x:x+width]
-                    if region.size == 0:
-                        continue
-                except:
-                    continue
+        contour_area = cv2.contourArea(contour)
+        extent = contour_area / area if area > 0 else 0
 
-                mean_brightness = np.mean(region)
-                bright_pixel_ratio = np.sum(region > brightness_threshold) / region.size
+        rect = cv2.minAreaRect(contour)
+        box_points = cv2.boxPoints(rect)
+        box_area = cv2.contourArea(box_points)
+        box_extent = contour_area / box_area if box_area > 0 else 0
 
-                area_normalized = min(area / max_area, 1.0)
+        edge_density = np.sum(edges[y:y+ch, x:x+cw] > 0) / area if area > 0 else 0
 
-                size_weight = area_normalized ** 2
+        area_normalized = min(area / max_area, 1.0)
+        size_weight = area_normalized ** 2
 
-                brightness_score = (mean_brightness / 255.0) * (1 + bright_pixel_ratio)
+        score = (extent * 0.4 + box_extent * 0.3 + edge_density * 0.3) * (0.3 + 0.7 * size_weight) * area * (1 - aspect_diff)
 
-                score = brightness_score * (0.3 + 0.7 * size_weight) * area
+        if score > best_score:
+            best_score = score
 
-                if score > best_score:
-                    best_score = score
-                    best_box = (x, y, x + width, y + height, min(brightness_score, 1.0))
+            refined_width = cw
+            refined_height = int(refined_width / target_aspect_ratio)
+
+            if refined_height <= ch:
+                center_y = y + ch // 2
+                refined_y = center_y - refined_height // 2
+                refined_y2 = center_y + refined_height // 2
+                refined_x = x
+                refined_x2 = x + refined_width
+            else:
+                refined_height = ch
+                refined_width = int(refined_height * target_aspect_ratio)
+                center_x = x + cw // 2
+                refined_x = center_x - refined_width // 2
+                refined_x2 = center_x + refined_width // 2
+                refined_y = y
+                refined_y2 = y + refined_height
+
+            refined_x = max(0, min(refined_x, w))
+            refined_y = max(0, min(refined_y, h))
+            refined_x2 = max(0, min(refined_x2, w))
+            refined_y2 = max(0, min(refined_y2, h))
+
+            confidence = min((best_score / max_area) * 2.0, 1.0)
+            best_box = (refined_x, refined_y, refined_x2, refined_y2, confidence)
 
     return best_box
 
@@ -269,34 +283,32 @@ def main():
     KNOWN_SCREEN_HEIGHT = 1080
     KNOWN_ASPECT_RATIO = KNOWN_SCREEN_WIDTH / KNOWN_SCREEN_HEIGHT if KNOWN_SCREEN_HEIGHT > 0 else None
 
-    YOLO_CONFIDENCE_THRESHOLD = 0.3
-    BRIGHTNESS_THRESHOLD_PERCENTILE = 50
-    SCAN_STEP_SIZE = 60
-    BRIGHTNESS_REFINE_STEP_SIZE = 50
+    YOLO_CONFIDENCE_THRESHOLD = 0.4
     DARKEN_FACTOR = 0.2
-    DETECTION_SKIP_FRAMES = 10
     USE_YOLO_FIRST = True
 
-    print(f"Using hybrid detection (YOLO + brightness) for {KNOWN_SCREEN_WIDTH}x{KNOWN_SCREEN_HEIGHT} screen (aspect ratio: {KNOWN_ASPECT_RATIO:.3f})")
+    print(f"Using hybrid detection (YOLO + edge detection) for {KNOWN_SCREEN_WIDTH}x{KNOWN_SCREEN_HEIGHT} screen (aspect ratio: {KNOWN_ASPECT_RATIO:.3f})")
     print(f"YOLO confidence threshold: {YOLO_CONFIDENCE_THRESHOLD}")
-    print(f"Brightness scan step size: {SCAN_STEP_SIZE} pixels")
+    print(f"Edge detection: Canny edge detection to find TV screen boundaries")
     print(f"Darkening non-screen regions to {DARKEN_FACTOR*100:.0f}% brightness")
 
     MIN_SCREEN_RATIO = 0.3
     MAX_SCREEN_RATIO = 0.95
 
-    UPDATE_EVERY_N_FRAMES = 3
-    AVERAGE_WEIGHT_NEW = 0.3
-    AVERAGE_WEIGHT_OLD = 0.7
-    MAX_DETECTION_DISTANCE = 0.3
-
-    DETECTION_HISTORY_SIZE = 10
-    CONFIDENCE_WEIGHT_POWER = 2.0
-    RECENCY_WEIGHT_DECAY = 0.9
+    # Detection timing: detect every 1 second, update every 5 seconds
+    DETECTION_INTERVAL_SECONDS = 1.0  # Detect screen position every second
+    UPDATE_INTERVAL_SECONDS = 5.0     # Update bounding box every 5 seconds
+    MAX_DETECTIONS_TO_COLLECT = 5     # Collect up to 5 detections before averaging
 
     CONFIDENCE_TRACKING_ENABLED = True
     CONFIDENCE_EMA_ALPHA = 0.3
     CONFIDENCE_THRESHOLD = 0.5
+
+    CAPTURE_SCREENSHOTS = True
+    SCREENSHOT_DIR = Path("screenshots")
+    if CAPTURE_SCREENSHOTS:
+        SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Screenshot capture enabled. Saving to: {SCREENSHOT_DIR}")
 
     MIN_CONSECUTIVE_FRAMES = {
         "commercial": 6,
@@ -350,20 +362,22 @@ def main():
     print(f"Target FPS: 30")
     print(f"Actual FPS: {actual_fps:.1f}")
     print(f"Prediction interval: {INTERVAL_SECONDS}s ({1/INTERVAL_SECONDS:.1f} predictions/sec)")
-    print(f"Detection runs every {DETECTION_SKIP_FRAMES} frame(s) (~{30/DETECTION_SKIP_FRAMES:.1f} detections/sec at 30 FPS)")
+    print(f"Screen detection: every {DETECTION_INTERVAL_SECONDS}s")
+    print(f"Bounding box update: every {UPDATE_INTERVAL_SECONDS}s (averaging {MAX_DETECTIONS_TO_COLLECT} detections)")
 
-    last_pred_time = 0
+    last_pred_time = time.time()
+    last_detection_time = time.time()
+    last_update_time = time.time()
 
     smoothed_box = None
-    frame_counter = 0
-    detection_frame_counter = 0
-
-    detection_history = []
+    detection_buffer = []  # Store detections collected over 10 seconds
+    latest_detection = None  # Keep the latest detection for fallback
 
     class_confidence_tracker = {}
     current_tracked_label = None
     consecutive_high_confidence = {}
     total_frames_per_label = {}
+
 
     try:
         while True:
@@ -374,15 +388,18 @@ def main():
                 break
 
             h, w = frame.shape[:2]
-            frame_area = h * w
 
-            best_screen = None
-            detection_frame_counter += 1
-            if detection_frame_counter >= DETECTION_SKIP_FRAMES:
-                detection_frame_counter = 0
-
+            current_time = time.time()
+            
+            # Detect screen position every DETECTION_INTERVAL_SECONDS
+            should_detect = (current_time - last_detection_time) >= DETECTION_INTERVAL_SECONDS
+            
+            if should_detect:
+                last_detection_time = current_time
+                
+                # Perform detection
+                best_screen = None
                 if USE_YOLO_FIRST:
-
                     yolo_results = yolo_model(frame, conf=YOLO_CONFIDENCE_THRESHOLD, verbose=False)
 
                     best_yolo_box = None
@@ -405,126 +422,96 @@ def main():
                                     best_yolo_box = (x1, y1, x2, y2, conf)
 
                     if best_yolo_box:
-                        refined_box = refine_yolo_detection_with_brightness(
+                        refined_box = refine_yolo_detection_with_edges(
                             frame,
                             best_yolo_box,
-                            KNOWN_ASPECT_RATIO,
-                            brightness_threshold_percentile=BRIGHTNESS_THRESHOLD_PERCENTILE,
-                            step_size=BRIGHTNESS_REFINE_STEP_SIZE
+                            KNOWN_ASPECT_RATIO
                         )
                         best_screen = refined_box if refined_box else best_yolo_box
-
                     else:
-
-                        best_screen = find_brightest_16_9_region(
+                        best_screen = find_tv_with_edges(
                             frame,
                             KNOWN_ASPECT_RATIO,
                             min_size_ratio=MIN_SCREEN_RATIO,
-                            max_size_ratio=MAX_SCREEN_RATIO,
-                            brightness_threshold_percentile=BRIGHTNESS_THRESHOLD_PERCENTILE,
-                            step_size=SCAN_STEP_SIZE
+                            max_size_ratio=MAX_SCREEN_RATIO
                         )
                 else:
-
-                    best_screen = find_brightest_16_9_region(
+                    best_screen = find_tv_with_edges(
                         frame,
                         KNOWN_ASPECT_RATIO,
                         min_size_ratio=MIN_SCREEN_RATIO,
-                        max_size_ratio=MAX_SCREEN_RATIO,
-                        brightness_threshold_percentile=BRIGHTNESS_THRESHOLD_PERCENTILE,
-                        step_size=SCAN_STEP_SIZE
+                        max_size_ratio=MAX_SCREEN_RATIO
                     )
+                
+                # Add detection to buffer if valid
+                if best_screen:
+                    x1, y1, x2, y2, conf = best_screen
+                    detection_buffer.append((float(x1), float(y1), float(x2), float(y2), float(conf)))
+                    latest_detection = best_screen  # Store latest detection for fallback
+                    
+                    # Keep only the most recent detections
+                    if len(detection_buffer) > MAX_DETECTIONS_TO_COLLECT:
+                        detection_buffer.pop(0)
+                    
+                    print(f"Detection collected: ({x1}, {y1}, {x2}, {y2}), confidence: {conf:.2f}, buffer size: {len(detection_buffer)}")
+            
+            # Update smoothed_box every UPDATE_INTERVAL_SECONDS by averaging all detections in buffer
+            should_update = (current_time - last_update_time) >= UPDATE_INTERVAL_SECONDS
+            
+            if should_update and len(detection_buffer) > 0:
+                last_update_time = current_time
+                
+                # Average all detections in the buffer
+                total_center_x = 0.0
+                total_center_y = 0.0
+                total_width = 0.0
+                total_height = 0.0
+                total_conf = 0.0
+                
+                for x1, y1, x2, y2, conf in detection_buffer:
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    width = x2 - x1
+                    height = y2 - y1
+                    
+                    total_center_x += center_x
+                    total_center_y += center_y
+                    total_width += width
+                    total_height += height
+                    total_conf += conf
+                
+                # Calculate averages
+                num_detections = len(detection_buffer)
+                avg_center_x = total_center_x / num_detections
+                avg_center_y = total_center_y / num_detections
+                avg_width = total_width / num_detections
+                avg_height = total_height / num_detections
+                avg_conf = total_conf / num_detections
+                
+                # Construct averaged box
+                new_x1 = avg_center_x - avg_width / 2
+                new_y1 = avg_center_y - avg_height / 2
+                new_x2 = avg_center_x + avg_width / 2
+                new_y2 = avg_center_y + avg_height / 2
+                
+                # Refine to aspect ratio if needed
+                if KNOWN_ASPECT_RATIO is not None:
+                    new_x1, new_y1, new_x2, new_y2 = refine_box_to_aspect_ratio(
+                        int(new_x1), int(new_y1), int(new_x2), int(new_y2),
+                        KNOWN_ASPECT_RATIO, w, h
+                    )
+                    new_x1, new_y1, new_x2, new_y2 = float(new_x1), float(new_y1), float(new_x2), float(new_y2)
+                
+                smoothed_box = (new_x1, new_y1, new_x2, new_y2, avg_conf)
+                
+                print(f"Bounding box updated: averaged {num_detections} detections")
+                print(f"  Box: ({int(new_x1)}, {int(new_y1)}, {int(new_x2)}, {int(new_y2)}), confidence: {avg_conf:.2f}")
+                
+                # Clear buffer after updating (optional - you can keep it if you want rolling updates)
+                # detection_buffer = []
 
-                if best_screen and detection_frame_counter % 20 == 0:
-                    bx1, by1, bx2, by2, bconf = best_screen
-
-            if best_screen:
-                x1, y1, x2, y2, conf = best_screen
-
-                if smoothed_box is None:
-
-                    if KNOWN_ASPECT_RATIO is not None:
-                        refined_x1, refined_y1, refined_x2, refined_y2 = refine_box_to_aspect_ratio(
-                            x1, y1, x2, y2, KNOWN_ASPECT_RATIO, w, h
-                        )
-                        smoothed_box = (float(refined_x1), float(refined_y1), float(refined_x2), float(refined_y2), conf)
-                        detection_history = [(float(refined_x1), float(refined_y1), float(refined_x2), float(refined_y2), conf, frame_counter)]
-                    else:
-                        smoothed_box = (float(x1), float(y1), float(x2), float(y2), conf)
-                        detection_history = [(float(x1), float(y1), float(x2), float(y2), conf, frame_counter)]
-                    frame_counter = 0
-                else:
-
-                    old_x1, old_y1, old_x2, old_y2, old_conf = smoothed_box
-                    old_center_x = (old_x1 + old_x2) / 2
-                    old_center_y = (old_y1 + old_y2) / 2
-
-                    new_center_x = (x1 + x2) / 2
-                    new_center_y = (y1 + y2) / 2
-
-                    center_distance_x = abs(new_center_x - old_center_x) / w
-                    center_distance_y = abs(new_center_y - old_center_y) / h
-                    max_distance = max(center_distance_x, center_distance_y)
-
-                    frame_counter += 1
-
-                    should_update = (max_distance < MAX_DETECTION_DISTANCE and
-                                    frame_counter >= UPDATE_EVERY_N_FRAMES)
-
-                    if should_update:
-
-                        detection_history.append((float(x1), float(y1), float(x2), float(y2), conf, frame_counter))
-
-                        if len(detection_history) > DETECTION_HISTORY_SIZE:
-                            detection_history.pop(0)
-
-                        total_weight = 0.0
-                        weighted_x1 = 0.0
-                        weighted_y1 = 0.0
-                        weighted_x2 = 0.0
-                        weighted_y2 = 0.0
-                        weighted_conf = 0.0
-
-                        for i, (hx1, hy1, hx2, hy2, hconf, hframe) in enumerate(detection_history):
-
-                            recency_weight = RECENCY_WEIGHT_DECAY ** (len(detection_history) - 1 - i)
-
-                            conf_weight = hconf ** CONFIDENCE_WEIGHT_POWER
-
-                            weight = recency_weight * conf_weight
-
-                            weighted_x1 += hx1 * weight
-                            weighted_y1 += hy1 * weight
-                            weighted_x2 += hx2 * weight
-                            weighted_y2 += hy2 * weight
-                            weighted_conf += hconf * weight
-                            total_weight += weight
-
-                        if total_weight > 0:
-                            new_x1 = weighted_x1 / total_weight
-                            new_y1 = weighted_y1 / total_weight
-                            new_x2 = weighted_x2 / total_weight
-                            new_y2 = weighted_y2 / total_weight
-                            new_conf = weighted_conf / total_weight
-                        else:
-
-                            new_x1 = AVERAGE_WEIGHT_OLD * old_x1 + AVERAGE_WEIGHT_NEW * x1
-                            new_y1 = AVERAGE_WEIGHT_OLD * old_y1 + AVERAGE_WEIGHT_NEW * y1
-                            new_x2 = AVERAGE_WEIGHT_OLD * old_x2 + AVERAGE_WEIGHT_NEW * x2
-                            new_y2 = AVERAGE_WEIGHT_OLD * old_y2 + AVERAGE_WEIGHT_NEW * y2
-                            new_conf = AVERAGE_WEIGHT_OLD * old_conf + AVERAGE_WEIGHT_NEW * conf
-
-                        if KNOWN_ASPECT_RATIO is not None:
-                            new_x1, new_y1, new_x2, new_y2 = refine_box_to_aspect_ratio(
-                                int(new_x1), int(new_y1), int(new_x2), int(new_y2),
-                                KNOWN_ASPECT_RATIO, w, h
-                            )
-                            new_x1, new_y1, new_x2, new_y2 = float(new_x1), float(new_y1), float(new_x2), float(new_y2)
-
-                        smoothed_box = (new_x1, new_y1, new_x2, new_y2, new_conf)
-                        frame_counter = 0
-
-            display_box = smoothed_box if smoothed_box is not None else best_screen
+            # Use smoothed_box if available, otherwise fall back to latest detection
+            display_box = smoothed_box if smoothed_box is not None else latest_detection
 
             if display_box:
                 sx1, sy1, sx2, sy2, sconf = display_box
@@ -553,7 +540,8 @@ def main():
             elapsed = now - last_pred_time
             if elapsed >= INTERVAL_SECONDS:
 
-                classification_box = display_box if display_box else (best_screen if best_screen else smoothed_box)
+                # Use the same box that's being displayed
+                classification_box = display_box
 
                 h_classify, w_classify = frame.shape[:2]
                 frame_area_classify = h_classify * w_classify
@@ -562,7 +550,7 @@ def main():
                     x1, y1, x2, y2, screen_conf = classification_box
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-                    shrink_factor = 0.02
+                    shrink_factor = 0.08
                     width = x2 - x1
                     height = y2 - y1
                     shrink_x = int(width * shrink_factor)
@@ -594,6 +582,12 @@ def main():
                         print("  No previous smoothed box available")
 
                 img = Image.fromarray(frame_rgb)
+
+                if CAPTURE_SCREENSHOTS:
+                    timestamp = int(time.time() * 1000)
+                    screenshot_path = SCREENSHOT_DIR / f"capture_{timestamp}.png"
+                    img.save(screenshot_path)
+                    print(f"Saved screenshot: {screenshot_path.name}")
 
                 label, confidence, all_predictions = predict_image_all(img, model, classes, device)
 

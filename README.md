@@ -5,25 +5,24 @@ A deep learning-based sports classification system that can identify sports (bas
 ## Project Structure
 
 ```
-sports-identifier/
-├── data/
-│   ├── train/          # Training images organized by class
-│   │   ├── basketball/
-│   │   ├── football/
-│   │   └── commercial/
-│   └── val/            # Validation images organized by class
-│       ├── basketball/
-│       ├── football/
-│       └── commercial/
-├── testing/            # Test images for evaluation
-├── train.py            # Model training script
-├── test.py             # Batch testing script
-├── predict_image.py    # Single image prediction script
-├── read_camera.py      # Real-time camera prediction
-├── read_screen.py      # Screen capture prediction
-├── predict_utils.py    # Utility functions for predictions
-├── camera_test.py      # Camera test utility
-└── sport_classifier_best.pth  # Trained model checkpoint
+sports-identifier
+├── display/           # Electron display app for showing classification status
+│   ├── electron/      # Electron main process
+│   ├── src/           # React frontend
+│   └── package.json   # Node dependencies
+├── testing/           # Test images for evaluation
+├── train.py           # Model training script
+├── test.py            # Batch testing script
+├── predict_image.py   # Single image prediction script
+├── read_camera.py     # Real-time camera prediction (main function)
+├── read_screen.py     # Screen capture prediction
+├── predict_utils.py   # Utility functions for predictions
+├── label_images.py    # Interactive image labeling tool (saves directly to train/val)
+├── get_images.py      # Image collection utility
+├── utils.py           # General utility functions
+├── websocket.py       # WebSocket server for real-time status updates
+├── sport_classifier_best.pth  # Best trained model
+├── sport_classifier.pth       # Alternative model
 ```
 
 ## Usage
@@ -80,6 +79,28 @@ python read_camera.py
 - Press 'q' to quit
 - Predictions are made every second
 - The script automatically detects available cameras
+- **Screen Detection**: Uses YOLO + basic edge detection to find and track TV screens
+- **Bounding Box Updates**: Detects screen position every second, updates bounding box every 5 seconds
+- **Screenshot Capture**: By default, screenshots are automatically saved to `screenshots/` every second for later labeling
+- **WebSocket Server**: Sends real-time classification status to display app (port 8765)
+
+### Data Collection and Labeling
+
+The system includes tools for continuous data collection and manual validation:
+
+1. **Capture Screenshots** (automatic):
+
+   - `read_camera.py` automatically saves screenshots to `screenshots/` every second
+   - Set `CAPTURE_SCREENSHOTS = False` in `read_camera.py` to disable
+
+2. **Label Images**:
+   ```bash
+   python label_images.py
+   ```
+   - Interactive GUI for reviewing and labeling captured screenshots from `screenshots/`
+   - **Automatic Train/Val Split**: Labeled images are automatically moved to `data/train/{class}/` or `data/val/{class}/` with a 65/35 random split
+   - Images are removed from `screenshots/` after labeling
+   - Ready for training with `train.py`
 
 ### Screen Capture Prediction
 
